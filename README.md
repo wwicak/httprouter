@@ -30,9 +30,9 @@ Of course you can also set **custom [`NotFound`](https://godoc.org/github.com/ju
 
 ## Usage
 
-This is just a quick introduction, view the [Docs](http://pkg.go.dev/github.com/julienschmidt/httprouter) for details.
+This is just a quick introduction, view the [Docs](http://pkg.go.dev/github.com/wwicak/httprouter) for details.
 
-    $ go get github.com/julienschmidt/httprouter
+    $ go get github.com/wwicak/httprouter
 
 and use it, like in this trivial example:
 
@@ -44,7 +44,7 @@ import (
     "net/http"
     "log"
 
-    "github.com/julienschmidt/httprouter"
+    "github.com/wwicak/httprouter"
 )
 
 func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
