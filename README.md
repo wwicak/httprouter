@@ -64,6 +64,39 @@ func main() {
 }
 ```
 
+### Go 1.22 pattern compatibility
+
+This fork includes an opt-in compatibility API for stdlib-style routing patterns:
+
+```go
+router := httprouter.New()
+router.PopulatePathValues = true // enables req.PathValue(...)
+
+router.HandlePattern("GET /users/{id}", func(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+    // Existing httprouter params API
+    _ = ps.ByName("id")
+
+    // Stdlib-compatible API
+    _ = r.PathValue("id")
+})
+
+router.HandlePattern("/assets/{filepath...}", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+    // Methodless pattern: matches any HTTP method
+    _ = r.PathValue("filepath")
+})
+```
+
+Supported wildcard forms in `HandlePattern`:
+
+- `{name}`
+- `{name...}` (must be last segment)
+- `{$}`
+
+Notes:
+
+- Host-based stdlib patterns are currently not supported.
+- `HandlePattern("GET ...")` enables HEAD->GET fallback behavior (ServeMux-like) on the router.
+
 ### Named parameters
 
 As you can see, `:name` is a *named parameter*. The values are accessible via `httprouter.Params`, which is just a slice of `httprouter.Param`s. You can get the value of a parameter either by its index in the slice, or by using the `ByName(name)` method: `:name` can be retrieved by `ByName("name")`.

@@ -6,30 +6,30 @@
 //
 // A trivial example is:
 //
-//  package main
+//	package main
 //
-//  import (
-//      "fmt"
-//      "github.com/julienschmidt/httprouter"
-//      "net/http"
-//      "log"
-//  )
+//	import (
+//	    "fmt"
+//	    "github.com/julienschmidt/httprouter"
+//	    "net/http"
+//	    "log"
+//	)
 //
-//  func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-//      fmt.Fprint(w, "Welcome!\n")
-//  }
+//	func Index(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+//	    fmt.Fprint(w, "Welcome!\n")
+//	}
 //
-//  func Hello(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-//      fmt.Fprintf(w, "hello, %s!\n", ps.ByName("name"))
-//  }
+//	func Hello(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+//	    fmt.Fprintf(w, "hello, %s!\n", ps.ByName("name"))
+//	}
 //
-//  func main() {
-//      router := httprouter.New()
-//      router.GET("/", Index)
-//      router.GET("/hello/:name", Hello)
+//	func main() {
+//	    router := httprouter.New()
+//	    router.GET("/", Index)
+//	    router.GET("/hello/:name", Hello)
 //
-//      log.Fatal(http.ListenAndServe(":8080", router))
-//  }
+//	    log.Fatal(http.ListenAndServe(":8080", router))
+//	}
 //
 // The router matches incoming requests by the request method and the path.
 // If a handle is registered for this path and method, the router delegates the
@@ -39,41 +39,45 @@
 //
 // The registered path, against which the router matches incoming requests, can
 // contain two types of parameters:
-//  Syntax    Type
-//  :name     named parameter
-//  *name     catch-all parameter
+//
+//	Syntax    Type
+//	:name     named parameter
+//	*name     catch-all parameter
 //
 // Named parameters are dynamic path segments. They match anything until the
 // next '/' or the path end:
-//  Path: /blog/:category/:post
 //
-//  Requests:
-//   /blog/go/request-routers            match: category="go", post="request-routers"
-//   /blog/go/request-routers/           no match, but the router would redirect
-//   /blog/go/                           no match
-//   /blog/go/request-routers/comments   no match
+//	Path: /blog/:category/:post
+//
+//	Requests:
+//	 /blog/go/request-routers            match: category="go", post="request-routers"
+//	 /blog/go/request-routers/           no match, but the router would redirect
+//	 /blog/go/                           no match
+//	 /blog/go/request-routers/comments   no match
 //
 // Catch-all parameters match anything until the path end, including the
 // directory index (the '/' before the catch-all). Since they match anything
 // until the end, catch-all parameters must always be the final path element.
-//  Path: /files/*filepath
 //
-//  Requests:
-//   /files/                             match: filepath="/"
-//   /files/LICENSE                      match: filepath="/LICENSE"
-//   /files/templates/article.html       match: filepath="/templates/article.html"
-//   /files                              no match, but the router would redirect
+//	Path: /files/*filepath
+//
+//	Requests:
+//	 /files/                             match: filepath="/"
+//	 /files/LICENSE                      match: filepath="/LICENSE"
+//	 /files/templates/article.html       match: filepath="/templates/article.html"
+//	 /files                              no match, but the router would redirect
 //
 // The value of parameters is saved as a slice of the Param struct, consisting
 // each of a key and a value. The slice is passed to the Handle func as a third
 // parameter.
 // There are two ways to retrieve the value of a parameter:
-//  // by the name of the parameter
-//  user := ps.ByName("user") // defined by :user or *user
 //
-//  // by the index of the parameter. This way you can also get the name (key)
-//  thirdKey   := ps[2].Key   // the name of the 3rd parameter
-//  thirdValue := ps[2].Value // the value of the 3rd parameter
+//	// by the name of the parameter
+//	user := ps.ByName("user") // defined by :user or *user
+//
+//	// by the index of the parameter. This way you can also get the name (key)
+//	thirdKey   := ps[2].Key   // the name of the 3rd parameter
+//	thirdValue := ps[2].Value // the value of the 3rd parameter
 package httprouter
 
 import (
@@ -139,6 +143,17 @@ func (ps Params) MatchedRoutePath() string {
 type Router struct {
 	trees map[string]*node
 
+	getTree     *node
+	headTree    *node
+	postTree    *node
+	putTree     *node
+	patchTree   *node
+	deleteTree  *node
+	optionsTree *node
+	connectTree *node
+	traceTree   *node
+	anyTree     *node
+
 	paramsPool sync.Pool
 	maxParams  uint16
 
@@ -147,6 +162,15 @@ type Router struct {
 	// The matched route path is only added to handlers of routes that were
 	// registered when this option was enabled.
 	SaveMatchedRoutePath bool
+
+	// If enabled, the router also writes path params to the http.Request via
+	// req.SetPathValue so handlers can use req.PathValue in a net/http ServeMux
+	// compatible way.
+	PopulatePathValues bool
+
+	// If enabled, HEAD requests fall back to GET handlers when no explicit HEAD
+	// handler matches the path.
+	HandleHEADWithGET bool
 
 	// Enables automatic redirection if the current route can't be matched but a
 	// handler for the path with (without) the trailing slash exists.
@@ -217,6 +241,86 @@ func New() *Router {
 		RedirectFixedPath:      true,
 		HandleMethodNotAllowed: true,
 		HandleOPTIONS:          true,
+	}
+}
+
+const anyMethod = ""
+
+func (r *Router) tree(method string) *node {
+	switch method {
+	case http.MethodGet:
+		return r.getTree
+	case http.MethodHead:
+		return r.headTree
+	case http.MethodPost:
+		return r.postTree
+	case http.MethodPut:
+		return r.putTree
+	case http.MethodPatch:
+		return r.patchTree
+	case http.MethodDelete:
+		return r.deleteTree
+	case http.MethodOptions:
+		return r.optionsTree
+	case http.MethodConnect:
+		return r.connectTree
+	case http.MethodTrace:
+		return r.traceTree
+	case anyMethod:
+		return r.anyTree
+	default:
+		if r.trees == nil {
+			return nil
+		}
+		return r.trees[method]
+	}
+}
+
+func (r *Router) setTree(method string, root *node) {
+	if r.trees == nil {
+		r.trees = make(map[string]*node)
+	}
+	r.trees[method] = root
+
+	switch method {
+	case http.MethodGet:
+		r.getTree = root
+	case http.MethodHead:
+		r.headTree = root
+	case http.MethodPost:
+		r.postTree = root
+	case http.MethodPut:
+		r.putTree = root
+	case http.MethodPatch:
+		r.patchTree = root
+	case http.MethodDelete:
+		r.deleteTree = root
+	case http.MethodOptions:
+		r.optionsTree = root
+	case http.MethodConnect:
+		r.connectTree = root
+	case http.MethodTrace:
+		r.traceTree = root
+	case anyMethod:
+		r.anyTree = root
+	}
+}
+
+func (r *Router) setPathValues(req *http.Request, ps Params) {
+	if !r.PopulatePathValues || len(ps) == 0 {
+		return
+	}
+
+	for _, p := range ps {
+		if p.Key == MatchedRoutePathParam {
+			continue
+		}
+
+		v := p.Value
+		if len(v) > 0 && v[0] == '/' {
+			v = v[1:]
+		}
+		req.SetPathValue(p.Key, v)
 	}
 }
 
@@ -291,9 +395,13 @@ func (r *Router) DELETE(path string, handle Handle) {
 // frequently used, non-standardized or custom methods (e.g. for internal
 // communication with a proxy).
 func (r *Router) Handle(method, path string, handle Handle) {
+	r.handle(method, path, handle, false)
+}
+
+func (r *Router) handle(method, path string, handle Handle, allowEmptyMethod bool) {
 	varsCount := uint16(0)
 
-	if method == "" {
+	if method == "" && !allowEmptyMethod {
 		panic("method must not be empty")
 	}
 	if len(path) < 1 || path[0] != '/' {
@@ -308,14 +416,10 @@ func (r *Router) Handle(method, path string, handle Handle) {
 		handle = r.saveMatchedRoutePath(path, handle)
 	}
 
-	if r.trees == nil {
-		r.trees = make(map[string]*node)
-	}
-
-	root := r.trees[method]
+	root := r.tree(method)
 	if root == nil {
 		root = new(node)
-		r.trees[method] = root
+		r.setTree(method, root)
 
 		r.globalAllowed = r.allowed("*", "")
 	}
@@ -367,7 +471,8 @@ func (r *Router) HandlerFunc(method, path string, handler http.HandlerFunc) {
 // of the Router's NotFound handler.
 // To use the operating system's file system implementation,
 // use http.Dir:
-//     router.ServeFiles("/src/*filepath", http.Dir("/var/www"))
+//
+//	router.ServeFiles("/src/*filepath", http.Dir("/var/www"))
 func (r *Router) ServeFiles(path string, root http.FileSystem) {
 	if len(path) < 10 || path[len(path)-10:] != "/*filepath" {
 		panic("path must end with /*filepath in path '" + path + "'")
@@ -392,19 +497,78 @@ func (r *Router) recv(w http.ResponseWriter, req *http.Request) {
 // If the path was found, it returns the handle function and the path parameter
 // values. Otherwise the third return value indicates whether a redirection to
 // the same path with an extra / without the trailing slash should be performed.
+func (r *Router) copyOutParams(ps *Params) Params {
+	out := make(Params, len(*ps))
+	copy(out, *ps)
+	r.putParams(ps)
+	return out
+}
+
 func (r *Router) Lookup(method, path string) (Handle, Params, bool) {
-	if root := r.trees[method]; root != nil {
-		handle, ps, tsr := root.getValue(path, r.getParams)
-		if handle == nil {
-			r.putParams(ps)
-			return nil, nil, tsr
-		}
-		if ps == nil {
-			return handle, nil, tsr
-		}
-		return handle, *ps, tsr
+	if r.trees == nil {
+		return nil, nil, false
 	}
-	return nil, nil, false
+
+	anyRoot := r.anyTree
+	if anyRoot == nil && !(method == http.MethodHead && r.HandleHEADWithGET) {
+		if root := r.tree(method); root != nil {
+			handle, ps, tsr := root.getValue(path, r.getParams)
+			if handle == nil {
+				r.putParams(ps)
+				return nil, nil, tsr
+			}
+			if ps == nil {
+				return handle, nil, tsr
+			}
+			return handle, r.copyOutParams(ps), tsr
+		}
+		return nil, nil, false
+	}
+
+	var tsr bool
+
+	primary := r.tree(method)
+	if primary != nil {
+		handle, ps, currentTSR := primary.getValue(path, r.getParams)
+		if handle != nil {
+			if ps == nil {
+				return handle, nil, currentTSR
+			}
+			return handle, r.copyOutParams(ps), currentTSR
+		}
+		r.putParams(ps)
+		tsr = tsr || currentTSR
+	}
+
+	var getRoot *node
+	if method == http.MethodHead && r.HandleHEADWithGET {
+		getRoot = r.getTree
+		if getRoot != nil && getRoot != primary {
+			handle, ps, currentTSR := getRoot.getValue(path, r.getParams)
+			if handle != nil {
+				if ps == nil {
+					return handle, nil, currentTSR
+				}
+				return handle, r.copyOutParams(ps), currentTSR
+			}
+			r.putParams(ps)
+			tsr = tsr || currentTSR
+		}
+	}
+
+	if anyRoot != nil && anyRoot != primary && anyRoot != getRoot {
+		handle, ps, currentTSR := anyRoot.getValue(path, r.getParams)
+		if handle != nil {
+			if ps == nil {
+				return handle, nil, currentTSR
+			}
+			return handle, r.copyOutParams(ps), currentTSR
+		}
+		r.putParams(ps)
+		tsr = tsr || currentTSR
+	}
+
+	return nil, nil, tsr
 }
 
 func (r *Router) allowed(path, reqMethod string) (allow string) {
@@ -414,7 +578,7 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 		// empty method is used for internal calls to refresh the cache
 		if reqMethod == "" {
 			for method := range r.trees {
-				if method == http.MethodOptions {
+				if method == anyMethod || method == http.MethodOptions {
 					continue
 				}
 				// Add request method to list of allowed methods
@@ -425,16 +589,18 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 		}
 	} else { // specific path
 		for method := range r.trees {
-			// Skip the requested method - we already tried this one
-			if method == reqMethod || method == http.MethodOptions {
+			// Skip non-explicit methods, the requested method - we already tried
+			// this one, and OPTIONS.
+			if method == anyMethod || method == reqMethod || method == http.MethodOptions {
 				continue
 			}
 
-			handle, _, _ := r.trees[method].getValue(path, nil)
+			handle, ps, _ := r.trees[method].getValue(path, nil)
 			if handle != nil {
 				// Add request method to list of allowed methods
 				allowed = append(allowed, method)
 			}
+			r.putParams(ps)
 		}
 	}
 
@@ -461,50 +627,177 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	path := req.URL.Path
+	method := req.Method
 
-	if root := r.trees[req.Method]; root != nil {
-		if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
-			if ps != nil {
-				handle(w, req, *ps)
-				r.putParams(ps)
-			} else {
-				handle(w, req, nil)
-			}
-			return
-		} else if req.Method != http.MethodConnect && path != "/" {
-			// Moved Permanently, request with GET method
-			code := http.StatusMovedPermanently
-			if req.Method != http.MethodGet {
-				// Permanent Redirect, request with same method
-				code = http.StatusPermanentRedirect
-			}
+	if r.trees != nil {
+		anyRoot := r.anyTree
 
-			if tsr && r.RedirectTrailingSlash {
-				if len(path) > 1 && path[len(path)-1] == '/' {
-					req.URL.Path = path[:len(path)-1]
+		// Fast path: no any-method routes and no HEAD->GET fallback.
+		if anyRoot == nil && !(method == http.MethodHead && r.HandleHEADWithGET) {
+			if root := r.tree(method); root != nil {
+				if handle, ps, tsr := root.getValue(path, r.getParams); handle != nil {
+					if ps != nil {
+						r.setPathValues(req, *ps)
+						handle(w, req, *ps)
+						r.putParams(ps)
+					} else {
+						handle(w, req, nil)
+					}
+					return
 				} else {
-					req.URL.Path = path + "/"
+					r.putParams(ps)
+
+					if method != http.MethodConnect && path != "/" {
+						// Moved Permanently, request with GET method
+						code := http.StatusMovedPermanently
+						if method != http.MethodGet {
+							// Permanent Redirect, request with same method
+							code = http.StatusPermanentRedirect
+						}
+
+						if tsr && r.RedirectTrailingSlash {
+							if len(path) > 1 && path[len(path)-1] == '/' {
+								req.URL.Path = path[:len(path)-1]
+							} else {
+								req.URL.Path = path + "/"
+							}
+							http.Redirect(w, req, req.URL.String(), code)
+							return
+						}
+
+						// Try to fix the request path
+						if r.RedirectFixedPath {
+							fixedPath, found := root.findCaseInsensitivePath(
+								CleanPath(path),
+								r.RedirectTrailingSlash,
+							)
+							if found {
+								req.URL.Path = fixedPath
+								http.Redirect(w, req, req.URL.String(), code)
+								return
+							}
+						}
+					}
 				}
-				http.Redirect(w, req, req.URL.String(), code)
-				return
+			}
+		} else {
+			var (
+				tsr         bool
+				primaryRoot *node
+				getRoot     *node
+				fallbackAny *node
+			)
+
+			primaryRoot = r.tree(method)
+			if primaryRoot != nil {
+				handle, ps, currentTSR := primaryRoot.getValue(path, r.getParams)
+				if handle != nil {
+					if ps != nil {
+						r.setPathValues(req, *ps)
+						handle(w, req, *ps)
+						r.putParams(ps)
+					} else {
+						handle(w, req, nil)
+					}
+					return
+				}
+				r.putParams(ps)
+				tsr = tsr || currentTSR
 			}
 
-			// Try to fix the request path
-			if r.RedirectFixedPath {
-				fixedPath, found := root.findCaseInsensitivePath(
-					CleanPath(path),
-					r.RedirectTrailingSlash,
-				)
-				if found {
-					req.URL.Path = fixedPath
+			if method == http.MethodHead && r.HandleHEADWithGET {
+				getRoot = r.getTree
+				if getRoot == primaryRoot {
+					getRoot = nil
+				}
+				if getRoot != nil {
+					handle, ps, currentTSR := getRoot.getValue(path, r.getParams)
+					if handle != nil {
+						if ps != nil {
+							r.setPathValues(req, *ps)
+							handle(w, req, *ps)
+							r.putParams(ps)
+						} else {
+							handle(w, req, nil)
+						}
+						return
+					}
+					r.putParams(ps)
+					tsr = tsr || currentTSR
+				}
+			}
+
+			fallbackAny = anyRoot
+			if fallbackAny == primaryRoot || fallbackAny == getRoot {
+				fallbackAny = nil
+			}
+			if fallbackAny != nil {
+				handle, ps, currentTSR := fallbackAny.getValue(path, r.getParams)
+				if handle != nil {
+					if ps != nil {
+						r.setPathValues(req, *ps)
+						handle(w, req, *ps)
+						r.putParams(ps)
+					} else {
+						handle(w, req, nil)
+					}
+					return
+				}
+				r.putParams(ps)
+				tsr = tsr || currentTSR
+			}
+
+			if (primaryRoot != nil || getRoot != nil || fallbackAny != nil) && method != http.MethodConnect && path != "/" {
+				// Moved Permanently, request with GET method
+				code := http.StatusMovedPermanently
+				if method != http.MethodGet {
+					// Permanent Redirect, request with same method
+					code = http.StatusPermanentRedirect
+				}
+
+				if tsr && r.RedirectTrailingSlash {
+					if len(path) > 1 && path[len(path)-1] == '/' {
+						req.URL.Path = path[:len(path)-1]
+					} else {
+						req.URL.Path = path + "/"
+					}
 					http.Redirect(w, req, req.URL.String(), code)
 					return
+				}
+
+				// Try to fix the request path
+				if r.RedirectFixedPath {
+					cleanPath := CleanPath(path)
+
+					if primaryRoot != nil {
+						if fixedPath, found := primaryRoot.findCaseInsensitivePath(cleanPath, r.RedirectTrailingSlash); found {
+							req.URL.Path = fixedPath
+							http.Redirect(w, req, req.URL.String(), code)
+							return
+						}
+					}
+
+					if getRoot != nil {
+						if fixedPath, found := getRoot.findCaseInsensitivePath(cleanPath, r.RedirectTrailingSlash); found {
+							req.URL.Path = fixedPath
+							http.Redirect(w, req, req.URL.String(), code)
+							return
+						}
+					}
+
+					if fallbackAny != nil {
+						if fixedPath, found := fallbackAny.findCaseInsensitivePath(cleanPath, r.RedirectTrailingSlash); found {
+							req.URL.Path = fixedPath
+							http.Redirect(w, req, req.URL.String(), code)
+							return
+						}
+					}
 				}
 			}
 		}
 	}
 
-	if req.Method == http.MethodOptions && r.HandleOPTIONS {
+	if method == http.MethodOptions && r.HandleOPTIONS {
 		// Handle OPTIONS requests
 		if allow := r.allowed(path, http.MethodOptions); allow != "" {
 			w.Header().Set("Allow", allow)
@@ -514,7 +807,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	} else if r.HandleMethodNotAllowed { // Handle 405
-		if allow := r.allowed(path, req.Method); allow != "" {
+		if allow := r.allowed(path, method); allow != "" {
 			w.Header().Set("Allow", allow)
 			if r.MethodNotAllowed != nil {
 				r.MethodNotAllowed.ServeHTTP(w, req)

@@ -67,6 +67,165 @@ func TestRouter(t *testing.T) {
 	}
 }
 
+func TestRouterPopulatePathValues(t *testing.T) {
+	router := New()
+	router.PopulatePathValues = true
+
+	var gotName, gotCatchAll string
+	router.GET("/users/:name", func(_ http.ResponseWriter, req *http.Request, _ Params) {
+		gotName = req.PathValue("name")
+	})
+	router.GET("/src/*filepath", func(_ http.ResponseWriter, req *http.Request, _ Params) {
+		gotCatchAll = req.PathValue("filepath")
+	})
+
+	w := new(mockResponseWriter)
+
+	req, _ := http.NewRequest(http.MethodGet, "/users/gopher", nil)
+	router.ServeHTTP(w, req)
+	if gotName != "gopher" {
+		t.Fatalf("unexpected PathValue for named wildcard: got %q want %q", gotName, "gopher")
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, "/src/js/app.js", nil)
+	router.ServeHTTP(w, req)
+	if gotCatchAll != "js/app.js" {
+		t.Fatalf("unexpected PathValue for catch-all wildcard: got %q want %q", gotCatchAll, "js/app.js")
+	}
+}
+
+func TestRouterHandlePattern(t *testing.T) {
+	router := New()
+	router.PopulatePathValues = true
+
+	var (
+		gotParam        string
+		gotPathVal      string
+		gotCatchAllPath string
+		headHit         bool
+	)
+
+	router.HandlePattern("GET /users/{name}", func(_ http.ResponseWriter, req *http.Request, ps Params) {
+		if req.Method == http.MethodHead {
+			headHit = true
+		}
+		gotParam = ps.ByName("name")
+		gotPathVal = req.PathValue("name")
+	})
+
+	router.HandlePattern("GET /src/{filepath...}", func(_ http.ResponseWriter, req *http.Request, _ Params) {
+		gotCatchAllPath = req.PathValue("filepath")
+	})
+
+	router.HandlePattern("GET /posts/{$}", func(_ http.ResponseWriter, _ *http.Request, _ Params) {})
+
+	w := new(mockResponseWriter)
+
+	req, _ := http.NewRequest(http.MethodGet, "/users/gopher", nil)
+	router.ServeHTTP(w, req)
+	if gotParam != "gopher" || gotPathVal != "gopher" {
+		t.Fatalf("unexpected values: param=%q pathValue=%q", gotParam, gotPathVal)
+	}
+
+	req, _ = http.NewRequest(http.MethodHead, "/users/gopher", nil)
+	router.ServeHTTP(w, req)
+	if !headHit {
+		t.Fatal("HEAD request did not fall back to GET pattern handler")
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, "/src/js/app.js", nil)
+	router.ServeHTTP(w, req)
+	if gotCatchAllPath != "js/app.js" {
+		t.Fatalf("unexpected catch-all PathValue: got %q want %q", gotCatchAllPath, "js/app.js")
+	}
+
+	h, _, tsr := router.Lookup(http.MethodGet, "/posts/")
+	if h == nil || tsr {
+		t.Fatalf("expected exact {$} route match, got handle=%v tsr=%v", h != nil, tsr)
+	}
+}
+
+func TestRouterHandlePatternMethodless(t *testing.T) {
+	router := New()
+
+	hits := 0
+	router.HandlePattern("/resources/{id}", func(_ http.ResponseWriter, _ *http.Request, ps Params) {
+		hits++
+		if ps.ByName("id") != "42" {
+			t.Fatalf("unexpected wildcard value: got %q", ps.ByName("id"))
+		}
+	})
+
+	w := new(mockResponseWriter)
+
+	req, _ := http.NewRequest(http.MethodGet, "/resources/42", nil)
+	router.ServeHTTP(w, req)
+
+	req, _ = http.NewRequest(http.MethodPost, "/resources/42", nil)
+	router.ServeHTTP(w, req)
+
+	if hits != 2 {
+		t.Fatalf("unexpected hit count: got %d want %d", hits, 2)
+	}
+}
+
+func TestRouterLookupPatternFallbacks(t *testing.T) {
+	router := New()
+	handler := func(_ http.ResponseWriter, _ *http.Request, _ Params) {}
+
+	router.HandlePattern("GET /users/{id}", handler)
+	router.HandlePattern("/any/{id}", handler)
+
+	h, ps, tsr := router.Lookup(http.MethodHead, "/users/5")
+	if h == nil || ps.ByName("id") != "5" || tsr {
+		t.Fatalf("unexpected HEAD->GET lookup result: handle=%v params=%v tsr=%v", h != nil, ps, tsr)
+	}
+
+	h, ps, tsr = router.Lookup(http.MethodPatch, "/any/9")
+	if h == nil || ps.ByName("id") != "9" || tsr {
+		t.Fatalf("unexpected any-method lookup result: handle=%v params=%v tsr=%v", h != nil, ps, tsr)
+	}
+}
+
+func TestRouterHandlePatternInvalid(t *testing.T) {
+	tests := []string{
+		"",
+		"GET example.com/users/{id}",
+		"GET /users/{id...}/details",
+		"GET /users/{bad-name}",
+		"GET /users/{id",
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		recv := catchPanic(func() {
+			New().HandlePattern(tc, func(_ http.ResponseWriter, _ *http.Request, _ Params) {})
+		})
+		if recv == nil {
+			t.Fatalf("expected panic for invalid pattern %q", tc)
+		}
+	}
+}
+
+func TestRouterHandlerPattern(t *testing.T) {
+	router := New()
+	router.PopulatePathValues = true
+
+	var gotCtxValue, gotPathValue string
+	router.HandlerPattern("GET /ctx/{id}", http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		gotCtxValue = ParamsFromContext(req.Context()).ByName("id")
+		gotPathValue = req.PathValue("id")
+	}))
+
+	w := new(mockResponseWriter)
+	req, _ := http.NewRequest(http.MethodGet, "/ctx/7", nil)
+	router.ServeHTTP(w, req)
+
+	if gotCtxValue != "7" || gotPathValue != "7" {
+		t.Fatalf("unexpected handler adapter values: ctx=%q pathValue=%q", gotCtxValue, gotPathValue)
+	}
+}
+
 type handlerStruct struct {
 	handled *bool
 }
