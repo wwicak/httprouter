@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          - "1.22.x"
+          - "1.26.x"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Go version
+        run: go version
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Race detector
+        run: go test -race ./...
+
+      - name: Shuffled tests
+        run: go test -shuffle=on ./...
+
+      - name: Fuzz smoke - CleanPath
+        run: go test . -run=^$ -fuzz=FuzzCleanPathIdempotent -fuzztime=3s
+
+      - name: Fuzz smoke - Duplicate routes
+        run: go test . -run=^$ -fuzz=FuzzTreeDuplicateRoutePanics -fuzztime=3s
+
+      - name: Fuzz smoke - Case insensitive lookup
+        run: go test . -run=^$ -fuzz=FuzzTreeFindCaseInsensitivePathInvariants -fuzztime=3s
+
+      - name: Benchmark smoke
+        if: matrix.go-version == '1.26.x'
+        run: go test ./... -run=^$ -bench='Benchmark(Allowed|RouterServeHTTP|RouterLookup)' -benchmem -benchtime=100ms

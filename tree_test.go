@@ -631,6 +631,31 @@ func TestTreeFindCaseInsensitivePath(t *testing.T) {
 	}
 }
 
+func TestTreeFindCaseInsensitivePathEmptyPath(t *testing.T) {
+	tree := &node{}
+	tree.addRoute("/", fakeHandler("/"))
+
+	recv := catchPanic(func() {
+		out, found := tree.findCaseInsensitivePath("", true)
+		if !found || out != "/" {
+			t.Fatalf("unexpected result: got %q, %t", out, found)
+		}
+	})
+	if recv != nil {
+		t.Fatalf("unexpected panic for empty path with slash fix: %v", recv)
+	}
+
+	recv = catchPanic(func() {
+		out, found := tree.findCaseInsensitivePath("", false)
+		if found || out != "" {
+			t.Fatalf("unexpected result: got %q, %t", out, found)
+		}
+	})
+	if recv != nil {
+		t.Fatalf("unexpected panic for empty path without slash fix: %v", recv)
+	}
+}
+
 func TestTreeInvalidNodeType(t *testing.T) {
 	const panicMsg = "invalid node type"
 

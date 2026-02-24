@@ -79,6 +79,7 @@ package httprouter
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -443,14 +444,8 @@ func (r *Router) allowed(path, reqMethod string) (allow string) {
 			allowed = append(allowed, http.MethodOptions)
 		}
 
-		// Sort allowed methods.
-		// sort.Strings(allowed) unfortunately causes unnecessary allocations
-		// due to allowed being moved to the heap and interface conversion
-		for i, l := 1, len(allowed); i < l; i++ {
-			for j := i; j > 0 && allowed[j] < allowed[j-1]; j-- {
-				allowed[j], allowed[j-1] = allowed[j-1], allowed[j]
-			}
-		}
+		// Sort allowed methods lexicographically for deterministic Allow headers.
+		slices.Sort(allowed)
 
 		// return as comma separated list
 		return strings.Join(allowed, ", ")

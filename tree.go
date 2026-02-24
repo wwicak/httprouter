@@ -28,34 +28,25 @@ func longestCommonPrefix(a, b string) int {
 
 // Search for a wildcard segment and check the name for invalid characters.
 // Returns -1 as index, if no wildcard was found.
-func findWildcard(path string) (wilcard string, i int, valid bool) {
-	// Find start
-	for start, c := range []byte(path) {
-		// A wildcard starts with ':' (param) or '*' (catch-all)
-		if c != ':' && c != '*' {
-			continue
-		}
-
-		// Find end and check for invalid characters
-		valid = true
-		for end, c := range []byte(path[start+1:]) {
-			switch c {
-			case '/':
-				return path[start : start+1+end], start, valid
-			case ':', '*':
-				valid = false
-			}
-		}
-		return path[start:], start, valid
+func findWildcard(path string) (wildcard string, i int, valid bool) {
+	start := strings.IndexAny(path, ":*")
+	if start < 0 {
+		return "", -1, false
 	}
-	return "", -1, false
+
+	wildcard = path[start:]
+	if end := strings.IndexByte(wildcard, '/'); end >= 0 {
+		wildcard = wildcard[:end]
+	}
+
+	valid = strings.IndexAny(wildcard[1:], ":*") < 0
+	return wildcard, start, valid
 }
 
 func countParams(path string) uint16 {
 	var n uint16
-	for i := range []byte(path) {
-		switch path[i] {
-		case ':', '*':
+	for i := 0; i < len(path); i++ {
+		if path[i] == ':' || path[i] == '*' {
 			n++
 		}
 	}
@@ -676,8 +667,8 @@ walk: // Outer loop for walking the tree
 		if path == "/" {
 			return ciPath
 		}
-		if len(path)+1 == npLen && n.path[len(path)] == '/' &&
-			strings.EqualFold(path[1:], n.path[1:len(path)]) && n.handle != nil {
+		if len(path)+1 == npLen && n.path[len(path)] == '/' && n.handle != nil &&
+			(len(path) == 0 || strings.EqualFold(path[1:], n.path[1:len(path)])) {
 			return append(ciPath, n.path...)
 		}
 	}

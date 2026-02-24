@@ -261,6 +261,138 @@ func BenchmarkAllowed(b *testing.B) {
 	})
 }
 
+type benchmarkResponseWriter struct {
+	header http.Header
+}
+
+func newBenchmarkResponseWriter() *benchmarkResponseWriter {
+	return &benchmarkResponseWriter{header: make(http.Header)}
+}
+
+func (w *benchmarkResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (*benchmarkResponseWriter) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+func (*benchmarkResponseWriter) WriteHeader(statusCode int) {}
+
+func benchmarkHandle(_ http.ResponseWriter, _ *http.Request, _ Params) {}
+
+func benchmarkMethodTableRouter() *Router {
+	router := New()
+	router.GET("/resource", benchmarkHandle)
+	router.HEAD("/resource", benchmarkHandle)
+	router.POST("/resource", benchmarkHandle)
+	router.PUT("/resource", benchmarkHandle)
+	router.PATCH("/resource", benchmarkHandle)
+	router.DELETE("/resource", benchmarkHandle)
+	router.OPTIONS("/resource", benchmarkHandle)
+	router.Handle(http.MethodTrace, "/resource", benchmarkHandle)
+	router.Handle(http.MethodConnect, "/resource", benchmarkHandle)
+	return router
+}
+
+var (
+	benchmarkLookupHandle Handle
+	benchmarkLookupParams Params
+	benchmarkLookupTSR    bool
+)
+
+func BenchmarkRouterServeHTTP(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		router *Router
+		method string
+		path   string
+	}{
+		{
+			name:   "Static",
+			router: func() *Router { r := New(); r.GET("/static/path", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/static/path",
+		},
+		{
+			name:   "Param",
+			router: func() *Router { r := New(); r.GET("/users/:id", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/users/gopher",
+		},
+		{
+			name:   "CatchAll",
+			router: func() *Router { r := New(); r.GET("/assets/*filepath", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/assets/js/app.js",
+		},
+		{
+			name:   "MethodTable",
+			router: benchmarkMethodTableRouter(),
+			method: http.MethodGet,
+			path:   "/resource",
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			req, _ := http.NewRequest(benchmark.method, benchmark.path, nil)
+			w := newBenchmarkResponseWriter()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchmark.router.ServeHTTP(w, req)
+			}
+		})
+	}
+}
+
+func BenchmarkRouterLookup(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		router *Router
+		method string
+		path   string
+	}{
+		{
+			name:   "Static",
+			router: func() *Router { r := New(); r.GET("/static/path", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/static/path",
+		},
+		{
+			name:   "Param",
+			router: func() *Router { r := New(); r.GET("/users/:id", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/users/gopher",
+		},
+		{
+			name:   "CatchAll",
+			router: func() *Router { r := New(); r.GET("/assets/*filepath", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/assets/js/app.js",
+		},
+		{
+			name:   "MethodTable",
+			router: benchmarkMethodTableRouter(),
+			method: http.MethodGet,
+			path:   "/resource",
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchmarkLookupHandle, benchmarkLookupParams, benchmarkLookupTSR = benchmark.router.Lookup(benchmark.method, benchmark.path)
+			}
+		})
+	}
+}
+
 func TestRouterOPTIONS(t *testing.T) {
 	handlerFunc := func(_ http.ResponseWriter, _ *http.Request, _ Params) {}
 
