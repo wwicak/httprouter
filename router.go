@@ -83,7 +83,6 @@ package httprouter
 import (
 	"context"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 )
@@ -143,16 +142,20 @@ func (ps Params) MatchedRoutePath() string {
 type Router struct {
 	trees map[string]*node
 
-	getTree     *node
-	headTree    *node
-	postTree    *node
-	putTree     *node
-	patchTree   *node
-	deleteTree  *node
-	optionsTree *node
-	connectTree *node
-	traceTree   *node
-	anyTree     *node
+	getTree         *node
+	headTree        *node
+	postTree        *node
+	putTree         *node
+	patchTree       *node
+	deleteTree      *node
+	optionsTree     *node
+	connectTree     *node
+	traceTree       *node
+	anyTree         *node
+	hasCustomMethod bool
+
+	patternMux     *http.ServeMux
+	patternMethods map[string]struct{}
 
 	paramsPool sync.Pool
 	maxParams  uint16
@@ -246,6 +249,166 @@ func New() *Router {
 
 const anyMethod = ""
 
+const (
+	allowBitConnect uint8 = 1 << iota
+	allowBitDelete
+	allowBitGet
+	allowBitHead
+	allowBitPatch
+	allowBitPost
+	allowBitPut
+	allowBitTrace
+)
+
+var (
+	allowedMaskNoOptions   [256]string
+	allowedMaskWithOptions [256]string
+)
+
+func init() {
+	for mask := 1; mask < 256; mask++ {
+		allowedMaskNoOptions[mask] = buildAllowedMaskString(uint8(mask), false)
+		allowedMaskWithOptions[mask] = buildAllowedMaskString(uint8(mask), true)
+	}
+}
+
+func buildAllowedMaskString(mask uint8, includeOptions bool) string {
+	allowed := make([]string, 0, 9)
+	if mask&allowBitConnect != 0 {
+		allowed = append(allowed, http.MethodConnect)
+	}
+	if mask&allowBitDelete != 0 {
+		allowed = append(allowed, http.MethodDelete)
+	}
+	if mask&allowBitGet != 0 {
+		allowed = append(allowed, http.MethodGet)
+	}
+	if mask&allowBitHead != 0 {
+		allowed = append(allowed, http.MethodHead)
+	}
+	if includeOptions {
+		allowed = append(allowed, http.MethodOptions)
+	}
+	if mask&allowBitPatch != 0 {
+		allowed = append(allowed, http.MethodPatch)
+	}
+	if mask&allowBitPost != 0 {
+		allowed = append(allowed, http.MethodPost)
+	}
+	if mask&allowBitPut != 0 {
+		allowed = append(allowed, http.MethodPut)
+	}
+	if mask&allowBitTrace != 0 {
+		allowed = append(allowed, http.MethodTrace)
+	}
+	return strings.Join(allowed, ", ")
+}
+
+func allowedFromMask(mask uint8, includeOptions bool) string {
+	if includeOptions {
+		return allowedMaskWithOptions[mask]
+	}
+	return allowedMaskNoOptions[mask]
+}
+
+func (r *Router) globalAllowedMask() uint8 {
+	var mask uint8
+	if r.connectTree != nil {
+		mask |= allowBitConnect
+	}
+	if r.deleteTree != nil {
+		mask |= allowBitDelete
+	}
+	if r.getTree != nil {
+		mask |= allowBitGet
+	}
+	if r.headTree != nil {
+		mask |= allowBitHead
+	}
+	if r.patchTree != nil {
+		mask |= allowBitPatch
+	}
+	if r.postTree != nil {
+		mask |= allowBitPost
+	}
+	if r.putTree != nil {
+		mask |= allowBitPut
+	}
+	if r.traceTree != nil {
+		mask |= allowBitTrace
+	}
+	return mask
+}
+
+func (r *Router) pathAllowedMask(path, reqMethod string) uint8 {
+	var mask uint8
+
+	if root := r.connectTree; root != nil && reqMethod != http.MethodConnect {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitConnect
+		}
+	}
+	if root := r.deleteTree; root != nil && reqMethod != http.MethodDelete {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitDelete
+		}
+	}
+
+	hasGet := false
+	if root := r.getTree; root != nil {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			hasGet = true
+			if reqMethod != http.MethodGet {
+				mask |= allowBitGet
+			}
+		}
+	}
+
+	hasHead := false
+	if root := r.headTree; root != nil {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			hasHead = true
+			if reqMethod != http.MethodHead {
+				mask |= allowBitHead
+			}
+		}
+	}
+	if r.HandleHEADWithGET && hasGet && !hasHead && reqMethod != http.MethodHead {
+		mask |= allowBitHead
+	}
+
+	if root := r.patchTree; root != nil && reqMethod != http.MethodPatch {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitPatch
+		}
+	}
+	if root := r.postTree; root != nil && reqMethod != http.MethodPost {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitPost
+		}
+	}
+	if root := r.putTree; root != nil && reqMethod != http.MethodPut {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitPut
+		}
+	}
+	if root := r.traceTree; root != nil && reqMethod != http.MethodTrace {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			mask |= allowBitTrace
+		}
+	}
+
+	return mask
+}
+
 func (r *Router) tree(method string) *node {
 	switch method {
 	case http.MethodGet:
@@ -303,6 +466,8 @@ func (r *Router) setTree(method string, root *node) {
 		r.traceTree = root
 	case anyMethod:
 		r.anyTree = root
+	default:
+		r.hasCustomMethod = true
 	}
 }
 
@@ -322,6 +487,33 @@ func (r *Router) setPathValues(req *http.Request, ps Params) {
 		}
 		req.SetPathValue(p.Key, v)
 	}
+}
+
+func (r *Router) patternHandlerForRequest(req *http.Request) (http.Handler, bool) {
+	if r.patternMux == nil {
+		return nil, false
+	}
+
+	handler, pattern := r.patternMux.Handler(req)
+	if pattern != "" {
+		return handler, true
+	}
+
+	if len(r.patternMethods) == 0 {
+		return nil, false
+	}
+
+	probe := *req
+	for method := range r.patternMethods {
+		if method == req.Method {
+			continue
+		}
+		probe.Method = method
+		if _, p := r.patternMux.Handler(&probe); p != "" {
+			return handler, true
+		}
+	}
+	return nil, false
 }
 
 func (r *Router) getParams() *Params {
@@ -504,6 +696,77 @@ func (r *Router) copyOutParams(ps *Params) Params {
 	return out
 }
 
+// ReleaseParams returns borrowed params to the internal pool.
+//
+// It is intended for use with LookupBorrowed/LookupNoCopy.
+func (r *Router) ReleaseParams(ps *Params) {
+	r.putParams(ps)
+}
+
+// LookupBorrowed is an allocation-optimized variant of Lookup.
+//
+// On success it may return params borrowed from the router's internal pool.
+// Call ReleaseParams when done with the returned params.
+func (r *Router) LookupBorrowed(method, path string) (Handle, *Params, bool) {
+	if r.trees == nil {
+		return nil, nil, false
+	}
+
+	anyRoot := r.anyTree
+	if anyRoot == nil && !(method == http.MethodHead && r.HandleHEADWithGET) {
+		if root := r.tree(method); root != nil {
+			handle, ps, tsr := root.getValue(path, r.getParams)
+			if handle == nil {
+				r.putParams(ps)
+				return nil, nil, tsr
+			}
+			return handle, ps, tsr
+		}
+		return nil, nil, false
+	}
+
+	var tsr bool
+
+	primary := r.tree(method)
+	if primary != nil {
+		handle, ps, currentTSR := primary.getValue(path, r.getParams)
+		if handle != nil {
+			return handle, ps, currentTSR
+		}
+		r.putParams(ps)
+		tsr = tsr || currentTSR
+	}
+
+	var getRoot *node
+	if method == http.MethodHead && r.HandleHEADWithGET {
+		getRoot = r.getTree
+		if getRoot != nil && getRoot != primary {
+			handle, ps, currentTSR := getRoot.getValue(path, r.getParams)
+			if handle != nil {
+				return handle, ps, currentTSR
+			}
+			r.putParams(ps)
+			tsr = tsr || currentTSR
+		}
+	}
+
+	if anyRoot != nil && anyRoot != primary && anyRoot != getRoot {
+		handle, ps, currentTSR := anyRoot.getValue(path, r.getParams)
+		if handle != nil {
+			return handle, ps, currentTSR
+		}
+		r.putParams(ps)
+		tsr = tsr || currentTSR
+	}
+
+	return nil, nil, tsr
+}
+
+// LookupNoCopy is an alias of LookupBorrowed.
+func (r *Router) LookupNoCopy(method, path string) (Handle, *Params, bool) {
+	return r.LookupBorrowed(method, path)
+}
+
 func (r *Router) Lookup(method, path string) (Handle, Params, bool) {
 	if r.trees == nil {
 		return nil, nil, false
@@ -572,58 +835,195 @@ func (r *Router) Lookup(method, path string) (Handle, Params, bool) {
 }
 
 func (r *Router) allowed(path, reqMethod string) (allow string) {
-	allowed := make([]string, 0, 9)
-
 	if path == "*" { // server-wide
-		// empty method is used for internal calls to refresh the cache
-		if reqMethod == "" {
-			for method := range r.trees {
-				if method == anyMethod || method == http.MethodOptions {
-					continue
-				}
-				// Add request method to list of allowed methods
-				allowed = append(allowed, method)
-			}
-		} else {
+		if reqMethod != "" {
 			return r.globalAllowed
 		}
-	} else { // specific path
+
+		if !r.hasCustomMethod {
+			if mask := r.globalAllowedMask(); mask != 0 {
+				return allowedFromMask(mask, r.HandleOPTIONS)
+			}
+			return ""
+		}
+
+		allowed := make([]string, 0, 9)
+		if r.connectTree != nil {
+			allowed = append(allowed, http.MethodConnect)
+		}
+		if r.deleteTree != nil {
+			allowed = append(allowed, http.MethodDelete)
+		}
+		if r.getTree != nil {
+			allowed = append(allowed, http.MethodGet)
+		}
+		if r.headTree != nil {
+			allowed = append(allowed, http.MethodHead)
+		}
+		if r.patchTree != nil {
+			allowed = append(allowed, http.MethodPatch)
+		}
+		if r.postTree != nil {
+			allowed = append(allowed, http.MethodPost)
+		}
+		if r.putTree != nil {
+			allowed = append(allowed, http.MethodPut)
+		}
+		if r.traceTree != nil {
+			allowed = append(allowed, http.MethodTrace)
+		}
+
 		for method := range r.trees {
-			// Skip non-explicit methods, the requested method - we already tried
-			// this one, and OPTIONS.
-			if method == anyMethod || method == reqMethod || method == http.MethodOptions {
+			switch method {
+			case anyMethod,
+				http.MethodOptions,
+				http.MethodConnect,
+				http.MethodDelete,
+				http.MethodGet,
+				http.MethodHead,
+				http.MethodPatch,
+				http.MethodPost,
+				http.MethodPut,
+				http.MethodTrace:
 				continue
 			}
-
-			handle, ps, _ := r.trees[method].getValue(path, nil)
-			if handle != nil {
-				// Add request method to list of allowed methods
-				allowed = append(allowed, method)
-			}
-			r.putParams(ps)
+			allowed = append(allowed, method)
 		}
-	}
 
-	if len(allowed) > 0 {
-		// Add request method to list of allowed methods
+		if len(allowed) == 0 {
+			return ""
+		}
 		if r.HandleOPTIONS {
 			allowed = append(allowed, http.MethodOptions)
 		}
-
-		// Sort allowed methods lexicographically for deterministic Allow headers.
-		slices.Sort(allowed)
-
-		// return as comma separated list
+		for i := 1; i < len(allowed); i++ {
+			for j := i; j > 0 && allowed[j] < allowed[j-1]; j-- {
+				allowed[j], allowed[j-1] = allowed[j-1], allowed[j]
+			}
+		}
 		return strings.Join(allowed, ", ")
 	}
 
-	return allow
+	if !r.hasCustomMethod {
+		if mask := r.pathAllowedMask(path, reqMethod); mask != 0 {
+			return allowedFromMask(mask, r.HandleOPTIONS)
+		}
+		return ""
+	}
+
+	allowed := make([]string, 0, 9)
+	if root := r.connectTree; root != nil && reqMethod != http.MethodConnect {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodConnect)
+		}
+	}
+	if root := r.deleteTree; root != nil && reqMethod != http.MethodDelete {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodDelete)
+		}
+	}
+
+	hasGet := false
+	if root := r.getTree; root != nil {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			hasGet = true
+			if reqMethod != http.MethodGet {
+				allowed = append(allowed, http.MethodGet)
+			}
+		}
+	}
+
+	hasHead := false
+	if root := r.headTree; root != nil {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			hasHead = true
+			if reqMethod != http.MethodHead {
+				allowed = append(allowed, http.MethodHead)
+			}
+		}
+	}
+	if r.HandleHEADWithGET && hasGet && !hasHead && reqMethod != http.MethodHead {
+		allowed = append(allowed, http.MethodHead)
+	}
+
+	if root := r.patchTree; root != nil && reqMethod != http.MethodPatch {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodPatch)
+		}
+	}
+	if root := r.postTree; root != nil && reqMethod != http.MethodPost {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodPost)
+		}
+	}
+	if root := r.putTree; root != nil && reqMethod != http.MethodPut {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodPut)
+		}
+	}
+	if root := r.traceTree; root != nil && reqMethod != http.MethodTrace {
+		handle, _, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, http.MethodTrace)
+		}
+	}
+
+	for method, root := range r.trees {
+		switch method {
+		case anyMethod,
+			http.MethodOptions,
+			http.MethodConnect,
+			http.MethodDelete,
+			http.MethodGet,
+			http.MethodHead,
+			http.MethodPatch,
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodTrace:
+			continue
+		}
+		if method == reqMethod {
+			continue
+		}
+		handle, ps, _ := root.getValue(path, nil)
+		if handle != nil {
+			allowed = append(allowed, method)
+		}
+		r.putParams(ps)
+	}
+
+	if len(allowed) == 0 {
+		return ""
+	}
+	if r.HandleOPTIONS {
+		allowed = append(allowed, http.MethodOptions)
+	}
+	for i := 1; i < len(allowed); i++ {
+		for j := i; j > 0 && allowed[j] < allowed[j-1]; j-- {
+			allowed[j], allowed[j-1] = allowed[j-1], allowed[j]
+		}
+	}
+	return strings.Join(allowed, ", ")
 }
 
 // ServeHTTP makes the router implement the http.Handler interface.
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if r.PanicHandler != nil {
 		defer r.recv(w, req)
+	}
+
+	if r.patternMux != nil {
+		if patternHandler, ok := r.patternHandlerForRequest(req); ok {
+			patternHandler.ServeHTTP(w, req)
+			return
+		}
 	}
 
 	path := req.URL.Path

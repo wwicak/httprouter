@@ -103,6 +103,7 @@ func TestRouterHandlePattern(t *testing.T) {
 		gotPathVal      string
 		gotCatchAllPath string
 		headHit         bool
+		postAnchorHit   bool
 	)
 
 	router.HandlePattern("GET /users/{name}", func(_ http.ResponseWriter, req *http.Request, ps Params) {
@@ -117,7 +118,9 @@ func TestRouterHandlePattern(t *testing.T) {
 		gotCatchAllPath = req.PathValue("filepath")
 	})
 
-	router.HandlePattern("GET /posts/{$}", func(_ http.ResponseWriter, _ *http.Request, _ Params) {})
+	router.HandlePattern("GET /posts/{$}", func(_ http.ResponseWriter, _ *http.Request, _ Params) {
+		postAnchorHit = true
+	})
 
 	w := new(mockResponseWriter)
 
@@ -139,9 +142,10 @@ func TestRouterHandlePattern(t *testing.T) {
 		t.Fatalf("unexpected catch-all PathValue: got %q want %q", gotCatchAllPath, "js/app.js")
 	}
 
-	h, _, tsr := router.Lookup(http.MethodGet, "/posts/")
-	if h == nil || tsr {
-		t.Fatalf("expected exact {$} route match, got handle=%v tsr=%v", h != nil, tsr)
+	req, _ = http.NewRequest(http.MethodGet, "/posts/", nil)
+	router.ServeHTTP(w, req)
+	if !postAnchorHit {
+		t.Fatal("expected {$} anchored route to match /posts/")
 	}
 }
 
@@ -169,28 +173,105 @@ func TestRouterHandlePatternMethodless(t *testing.T) {
 	}
 }
 
-func TestRouterLookupPatternFallbacks(t *testing.T) {
+func TestRouterHandlePatternHostBased(t *testing.T) {
 	router := New()
-	handler := func(_ http.ResponseWriter, _ *http.Request, _ Params) {}
 
-	router.HandlePattern("GET /users/{id}", handler)
-	router.HandlePattern("/any/{id}", handler)
+	hit := false
+	router.HandlePattern("GET api.example.com/users/{id}", func(_ http.ResponseWriter, _ *http.Request, ps Params) {
+		hit = ps.ByName("id") == "7"
+	})
 
-	h, ps, tsr := router.Lookup(http.MethodHead, "/users/5")
-	if h == nil || ps.ByName("id") != "5" || tsr {
-		t.Fatalf("unexpected HEAD->GET lookup result: handle=%v params=%v tsr=%v", h != nil, ps, tsr)
+	req, _ := http.NewRequest(http.MethodGet, "http://api.example.com/users/7", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if !hit {
+		t.Fatal("expected host-based pattern to match api.example.com")
 	}
 
-	h, ps, tsr = router.Lookup(http.MethodPatch, "/any/9")
-	if h == nil || ps.ByName("id") != "9" || tsr {
-		t.Fatalf("unexpected any-method lookup result: handle=%v params=%v tsr=%v", h != nil, ps, tsr)
+	hit = false
+	req, _ = http.NewRequest(http.MethodGet, "http://www.example.com/users/7", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if hit {
+		t.Fatal("host-based pattern must not match different hosts")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unexpected status code for host mismatch: got %d want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestRouterHandlePatternServeMuxPrecedence(t *testing.T) {
+	router := New()
+
+	picked := ""
+	router.HandlePattern("GET /posts/{id}", func(_ http.ResponseWriter, _ *http.Request, _ Params) {
+		picked = "wildcard"
+	})
+	router.HandlePattern("GET /posts/latest", func(_ http.ResponseWriter, _ *http.Request, _ Params) {
+		picked = "static"
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/posts/latest", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if picked != "static" {
+		t.Fatalf("expected static pattern precedence, got %q", picked)
+	}
+}
+
+func TestRouterHandlePatternMethodNotAllowed(t *testing.T) {
+	router := New()
+	router.HandlePattern("GET /onlyget", func(_ http.ResponseWriter, _ *http.Request, _ Params) {})
+
+	req, _ := http.NewRequest(http.MethodPost, "/onlyget", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status code: got %d want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+	if allow := w.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Fatalf("unexpected Allow header from ServeMux compatibility path: %q", allow)
+	}
+}
+
+func TestRouterServeMuxPatternFallbacks(t *testing.T) {
+	router := New()
+
+	headHit := false
+	anyHit := false
+
+	router.HandlePattern("GET /users/{id}", func(_ http.ResponseWriter, req *http.Request, ps Params) {
+		if req.Method == http.MethodHead && ps.ByName("id") == "5" {
+			headHit = true
+		}
+	})
+	router.HandlePattern("/any/{id}", func(_ http.ResponseWriter, _ *http.Request, ps Params) {
+		if ps.ByName("id") == "9" {
+			anyHit = true
+		}
+	})
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest(http.MethodHead, "/users/5", nil)
+	router.ServeHTTP(w, req)
+	if !headHit {
+		t.Fatal("expected HEAD request to match GET pattern")
+	}
+
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodPatch, "/any/9", nil)
+	router.ServeHTTP(w, req)
+	if !anyHit {
+		t.Fatal("expected methodless pattern to match PATCH request")
 	}
 }
 
 func TestRouterHandlePatternInvalid(t *testing.T) {
 	tests := []string{
 		"",
-		"GET example.com/users/{id}",
+		"GET users",
 		"GET /users/{id...}/details",
 		"GET /users/{bad-name}",
 		"GET /users/{id",
@@ -223,6 +304,37 @@ func TestRouterHandlerPattern(t *testing.T) {
 
 	if gotCtxValue != "7" || gotPathValue != "7" {
 		t.Fatalf("unexpected handler adapter values: ctx=%q pathValue=%q", gotCtxValue, gotPathValue)
+	}
+}
+
+func TestRouterCustomMethodFallbacks(t *testing.T) {
+	router := New()
+	hit := false
+
+	router.Handle("PROPFIND", "/dav/resource", func(_ http.ResponseWriter, _ *http.Request, _ Params) {
+		hit = true
+	})
+
+	h, ps, tsr := router.Lookup("PROPFIND", "/dav/resource")
+	if h == nil || len(ps) != 0 || tsr {
+		t.Fatalf("unexpected custom method lookup result: handle=%v params=%v tsr=%v", h != nil, ps, tsr)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "/dav/resource", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("unexpected status code: got %d want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+	if allow := w.Header().Get("Allow"); allow != "OPTIONS, PROPFIND" {
+		t.Fatalf("unexpected Allow header for custom method: %q", allow)
+	}
+
+	req, _ = http.NewRequest("PROPFIND", "/dav/resource", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if !hit {
+		t.Fatal("custom method handler was not invoked")
 	}
 }
 
@@ -454,10 +566,25 @@ func benchmarkMethodTableRouter() *Router {
 	return router
 }
 
+func benchmarkPatternRouter() *Router {
+	router := New()
+	router.HandlePattern("GET /resource/{id}", benchmarkHandle)
+	return router
+}
+
+func benchmarkHostPatternRouter() *Router {
+	router := New()
+	router.HandlePattern("GET api.example.com/resource/{id}", benchmarkHandle)
+	return router
+}
+
 var (
-	benchmarkLookupHandle Handle
-	benchmarkLookupParams Params
-	benchmarkLookupTSR    bool
+	benchmarkLookupHandle         Handle
+	benchmarkLookupParams         Params
+	benchmarkLookupTSR            bool
+	benchmarkLookupBorrowedHandle Handle
+	benchmarkLookupBorrowedTSR    bool
+	benchmarkLookupBorrowedValue  string
 )
 
 func BenchmarkRouterServeHTTP(b *testing.B) {
@@ -497,6 +624,38 @@ func BenchmarkRouterServeHTTP(b *testing.B) {
 		benchmark := benchmark
 		b.Run(benchmark.name, func(b *testing.B) {
 			req, _ := http.NewRequest(benchmark.method, benchmark.path, nil)
+			w := newBenchmarkResponseWriter()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchmark.router.ServeHTTP(w, req)
+			}
+		})
+	}
+}
+
+func BenchmarkRouterServeHTTPPattern(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		router *Router
+		url    string
+	}{
+		{
+			name:   "PathParam",
+			router: benchmarkPatternRouter(),
+			url:    "http://example.com/resource/42",
+		},
+		{
+			name:   "HostAndPathParam",
+			router: benchmarkHostPatternRouter(),
+			url:    "http://api.example.com/resource/42",
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			req, _ := http.NewRequest(http.MethodGet, benchmark.url, nil)
 			w := newBenchmarkResponseWriter()
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -547,6 +706,58 @@ func BenchmarkRouterLookup(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				benchmarkLookupHandle, benchmarkLookupParams, benchmarkLookupTSR = benchmark.router.Lookup(benchmark.method, benchmark.path)
+			}
+		})
+	}
+}
+
+func BenchmarkRouterLookupBorrowed(b *testing.B) {
+	benchmarks := []struct {
+		name   string
+		router *Router
+		method string
+		path   string
+	}{
+		{
+			name:   "Static",
+			router: func() *Router { r := New(); r.GET("/static/path", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/static/path",
+		},
+		{
+			name:   "Param",
+			router: func() *Router { r := New(); r.GET("/users/:id", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/users/gopher",
+		},
+		{
+			name:   "CatchAll",
+			router: func() *Router { r := New(); r.GET("/assets/*filepath", benchmarkHandle); return r }(),
+			method: http.MethodGet,
+			path:   "/assets/js/app.js",
+		},
+		{
+			name:   "MethodTable",
+			router: benchmarkMethodTableRouter(),
+			method: http.MethodGet,
+			path:   "/resource",
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		benchmark := benchmark
+		b.Run(benchmark.name, func(b *testing.B) {
+			var ps *Params
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				benchmarkLookupBorrowedHandle, ps, benchmarkLookupBorrowedTSR = benchmark.router.LookupBorrowed(benchmark.method, benchmark.path)
+				if ps != nil {
+					if len(*ps) > 0 {
+						benchmarkLookupBorrowedValue = (*ps)[0].Value
+					}
+					benchmark.router.ReleaseParams(ps)
+				}
 			}
 		})
 	}
@@ -853,6 +1064,35 @@ func TestRouterLookup(t *testing.T) {
 	}
 	if tsr {
 		t.Error("Got wrong TSR recommendation!")
+	}
+}
+
+func TestRouterLookupBorrowed(t *testing.T) {
+	router := New()
+	h := func(_ http.ResponseWriter, _ *http.Request, _ Params) {}
+	router.GET("/users/:name", h)
+	router.GET("/users", h)
+
+	handle, ps, tsr := router.LookupBorrowed(http.MethodGet, "/users/gopher")
+	if handle == nil || tsr {
+		t.Fatalf("unexpected borrowed lookup result: handle=%v tsr=%v", handle != nil, tsr)
+	}
+	if ps == nil || len(*ps) != 1 || (*ps)[0].Key != "name" || (*ps)[0].Value != "gopher" {
+		t.Fatalf("unexpected borrowed params: %#v", ps)
+	}
+	router.ReleaseParams(ps)
+
+	handle, ps, tsr = router.LookupNoCopy(http.MethodGet, "/users")
+	if handle == nil || tsr {
+		t.Fatalf("unexpected nocopy lookup result: handle=%v tsr=%v", handle != nil, tsr)
+	}
+	if ps != nil {
+		t.Fatalf("expected nil params for static route, got %#v", ps)
+	}
+
+	handle, ps, tsr = router.LookupBorrowed(http.MethodGet, "/users/gopher/")
+	if handle != nil || !tsr || ps != nil {
+		t.Fatalf("unexpected TSR result: handle=%v tsr=%v ps=%#v", handle != nil, tsr, ps)
 	}
 }
 

@@ -94,8 +94,30 @@ Supported wildcard forms in `HandlePattern`:
 
 Notes:
 
-- Host-based stdlib patterns are currently not supported.
-- `HandlePattern("GET ...")` enables HEAD->GET fallback behavior (ServeMux-like) on the router.
+- Host-based patterns are supported (for example: `"GET api.example.com/users/{id}"`).
+- Pattern dispatch follows Go 1.22 `http.ServeMux` semantics (precedence, methods, hosts, redirects).
+- `req.PathValue(...)` works out of the box for `HandlePattern` routes, and the same values are exposed via `httprouter.Params`.
+- Full ServeMux-compatibility mode prioritizes semantics over raw speed. For the fastest (double-digit ns) routing path, use the native `Handle`/`GET`/`POST` trie APIs.
+
+### Advanced lookup API (optional)
+
+For very hot lookup paths, this fork provides an allocation-optimized lookup API:
+
+```go
+handle, borrowed, tsr := router.LookupBorrowed(http.MethodGet, "/users/42")
+if handle != nil {
+    // use borrowed params
+    if borrowed != nil {
+        _ = (*borrowed)[0].Value
+        router.ReleaseParams(borrowed)
+    }
+}
+_ = tsr
+```
+
+- `LookupBorrowed` / `LookupNoCopy` return params that may be borrowed from an internal pool.
+- You must call `ReleaseParams` when done with non-nil borrowed params.
+- Use regular `Lookup` if you prefer simpler ownership semantics.
 
 ### Named parameters
 
